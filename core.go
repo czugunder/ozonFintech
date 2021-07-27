@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/gob"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 )
 
 var waitGroup sync.WaitGroup
@@ -56,28 +58,71 @@ func (st *storage) runJanitor() {
 }
 
 type storage struct {
-	pairs       map[string]pair // TODO make a point that it is impossible to make a byte slice a key, strings used instead
-	mutex       sync.RWMutex
-	defaultExp  time.Duration
-	janitor     *janitor
-	maxElements int
+	pairs      map[string]pair // TODO make a point that it is impossible to make a byte slice a key, strings used instead
+	mutex      sync.RWMutex
+	defaultExp time.Duration
+	janitor    *janitor
+	maxSize    int
 }
 
-func (st *storage) init(defExp time.Duration, janInt time.Duration) {
+func (st *storage) weight() (int, error) {
+	buffer := new(bytes.Buffer)
+	encoder := gob.NewEncoder(buffer)
+	st.mutex.RLock()
+	for _, val := range st.pairs {
+		gob.Register(val.Value)
+	}
+	err := encoder.Encode(&st.pairs)
+	st.mutex.RUnlock()
+	if err != nil {
+		return 0, err
+	} else {
+		return buffer.Len(), nil
+	}
+
+}
+
+func (st *storage) init(defExp time.Duration, janInt time.Duration, enaJan bool, mSize int) {
 	st.pairs = make(map[string]pair)
 	st.defaultExp = defExp
 	st.janitor = &janitor{
 		interval: janInt,
 		stop:     make(chan bool),
 	}
+	if enaJan {
+		st.runJanitor()
+	}
+	st.maxSize = mSize
 }
 
-func (st *storage) add(inKey string, inValue interface{}, inTTL time.Duration) {
+func (st *storage) add(inKey string, inValue interface{}, inTTL time.Duration, boolCh chan bool) {
 	defer waitGroup.Done()
 	var inExp = time.Now().Add(inTTL).UnixNano()
-	st.mutex.Lock()
-	st.pairs[inKey] = pair{Value: inValue, TTL: inExp}
-	st.mutex.Unlock()
+	var wasAdded bool
+	if st.maxSize > 0 {
+		var appendixSize, currentSize int
+		var err error
+		buffer := new(bytes.Buffer)
+		if err = gob.NewEncoder(buffer).Encode(inValue); err == nil {
+			appendixSize += buffer.Len() - 4
+			appendixSize += len(inKey)
+			structSize := int(unsafe.Sizeof(pair{Value: inValue, TTL: inExp}))
+			appendixSize += structSize
+			currentSize, err = st.weight()
+			if appendixSize+currentSize <= st.maxSize {
+				st.mutex.Lock()
+				defer st.mutex.Unlock()
+				st.pairs[inKey] = pair{Value: inValue, TTL: inExp}
+				wasAdded = true
+			}
+		}
+	} else {
+		st.mutex.Lock()
+		defer st.mutex.Unlock()
+		st.pairs[inKey] = pair{Value: inValue, TTL: inExp}
+		wasAdded = true
+	}
+	boolCh <- wasAdded
 }
 
 func (st *storage) find(inKey string, interfaceCh chan interface{}) {
@@ -168,8 +213,7 @@ func (st *storage) load(filepath string) error {
 func main() {
 	var mainStorage storage
 	janitorInterval, _ := time.ParseDuration("10s")
-	mainStorage.init(0, janitorInterval)
-
+	mainStorage.init(0, janitorInterval, false, 0)
 	fmt.Println("Key - Value storage enabled!")
 	directMode(&mainStorage)
 }
@@ -210,16 +254,26 @@ loop:
 				fmt.Println("Input has bad TTL parameter, try in XhXmXs format.")
 			} else {
 				waitGroup.Add(1)
-				go st.add(commandBuffer[1], commandBuffer[2], buffer)
+				go st.add(commandBuffer[1], commandBuffer[2], buffer, boolChannel)
+				resultBool = <-boolChannel
 				waitGroup.Wait()
-				fmt.Printf("Key-Value pair {%s: %s} saved!\n", commandBuffer[1], commandBuffer[2])
+				if resultBool == true {
+					fmt.Printf("Key-Value pair {%s: %s} saved!\n", commandBuffer[1], commandBuffer[2])
+				} else {
+					fmt.Printf("Key-Value pair {%s: %s} was not saved.\n", commandBuffer[1], commandBuffer[2])
+				}
 			}
 		case addDefaultTTLCommandRegex.MatchString(command):
 			commandBuffer = strings.Split(command, " ")
 			waitGroup.Add(1)
-			go st.add(commandBuffer[1], commandBuffer[2], st.defaultExp)
+			go st.add(commandBuffer[1], commandBuffer[2], st.defaultExp, boolChannel)
+			resultBool = <-boolChannel
 			waitGroup.Wait()
-			fmt.Printf("Key-Value pair {%s: %s} saved!\n", commandBuffer[1], commandBuffer[2])
+			if resultBool == true {
+				fmt.Printf("Key-Value pair {%s: %s} saved!\n", commandBuffer[1], commandBuffer[2])
+			} else {
+				fmt.Printf("Key-Value pair {%s: %s} was not saved.\n", commandBuffer[1], commandBuffer[2])
+			}
 		case findCommandRegex.MatchString(command):
 			commandBuffer = strings.Split(command, " ")
 			waitGroup.Add(1)
