@@ -101,6 +101,10 @@ func (st *storage) init(defExp time.Duration, janInt time.Duration, enaJan bool,
 func (st *storage) add(inKey string, inValue interface{}, inTTL time.Duration, boolCh chan bool) {
 	defer waitGroup.Done()
 	var inExp = time.Now().Add(inTTL).UnixNano()
+	buffer, _ := time.ParseDuration("0")
+	if inTTL == buffer {
+		inExp = 0
+	}
 	var wasAdded bool
 	if st.maxSize > 0 {
 		var appendixSize, currentSize int
@@ -215,8 +219,8 @@ func (st *storage) load(filepath string) error {
 
 func main() {
 	var mainStorage storage
-	janitorInterval, _ := time.ParseDuration("10s")
-	mainStorage.init(0, janitorInterval, false, 0)
+	janitorInterval, _ := time.ParseDuration("5s")
+	mainStorage.init(0, janitorInterval, true, 180)
 	go serverMode(&mainStorage)
 	fmt.Println("Key - Value storage enabled!")
 	directMode(&mainStorage)
