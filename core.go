@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -214,8 +217,93 @@ func main() {
 	var mainStorage storage
 	janitorInterval, _ := time.ParseDuration("10s")
 	mainStorage.init(0, janitorInterval, false, 0)
+	go serverMode(&mainStorage)
 	fmt.Println("Key - Value storage enabled!")
 	directMode(&mainStorage)
+}
+
+type addRequest struct {
+	Key   string
+	Value interface{}
+	TTL   string
+}
+
+func addRequestHandle(w http.ResponseWriter, r *http.Request, st *storage) {
+	decoder := json.NewDecoder(r.Body)
+	var req addRequest
+	var err error
+	var buffer time.Duration
+	var boolChannel = make(chan bool)
+	var resultBool bool
+	err = decoder.Decode(&req)
+	if err != nil {
+		fmt.Fprintln(w, err)
+	} else {
+		buffer, err = time.ParseDuration(req.TTL)
+		if err != nil {
+			fmt.Fprintln(w, err)
+		} else {
+			waitGroup.Add(1)
+			go st.add(req.Key, req.Value, buffer, boolChannel)
+			resultBool = <-boolChannel
+			waitGroup.Wait()
+			fmt.Fprint(w, resultBool)
+		}
+	}
+}
+
+type keyRequest struct {
+	Key string
+}
+
+func findRequestHandle(w http.ResponseWriter, r *http.Request, st *storage) {
+	decoder := json.NewDecoder(r.Body)
+	var req keyRequest
+	var err error
+	var interfaceChannel = make(chan interface{})
+	var resultInterface interface{}
+	err = decoder.Decode(&req)
+	if err != nil {
+		fmt.Fprintln(w, err)
+	} else {
+		waitGroup.Add(1)
+		go st.find(req.Key, interfaceChannel)
+		resultInterface = <-interfaceChannel
+		waitGroup.Wait()
+		fmt.Fprint(w, resultInterface)
+	}
+}
+
+func delRequestHandle(w http.ResponseWriter, r *http.Request, st *storage) {
+	decoder := json.NewDecoder(r.Body)
+	var req keyRequest
+	var err error
+	var boolChannel = make(chan bool)
+	var resultBool bool
+	err = decoder.Decode(&req)
+	if err != nil {
+		fmt.Fprintln(w, err)
+	} else {
+		waitGroup.Add(1)
+		go st.del(req.Key, boolChannel)
+		resultBool = <-boolChannel
+		waitGroup.Wait()
+		fmt.Fprint(w, resultBool)
+	}
+}
+
+func serverMode(st *storage) {
+	fmt.Println("Server interface active!")
+	http.HandleFunc("/add", func(w http.ResponseWriter, r *http.Request) {
+		addRequestHandle(w, r, st)
+	})
+	http.HandleFunc("/find", func(w http.ResponseWriter, r *http.Request) {
+		findRequestHandle(w, r, st)
+	})
+	http.HandleFunc("/del", func(w http.ResponseWriter, r *http.Request) {
+		delRequestHandle(w, r, st)
+	})
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 func directMode(st *storage) {
